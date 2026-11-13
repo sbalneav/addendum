@@ -48,4 +48,4 @@ JDK 17 or later, Android SDK, `local.properties` (git-ignored) with `sdk.dir=...
 - Keep it small: one record per send, no editing or browsing files. That's what the shell is for.
 - Forms only ever append; they never change existing lines.
 - Money and numbers stay strings, never Double.
-- Branch `master`.
+- Branch `main`.
