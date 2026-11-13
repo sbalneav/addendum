@@ -1,0 +1,50 @@
+#!/bin/bash
+# demo: a Addendum form that uses every field type, for testing the app.
+# Writes to a scratch file, never anything real. Not installed by
+# "make deploy"; copy it to ~/.config/addendum/forms/ by hand when testing.
+
+set -euo pipefail
+source "${ADDENDUM_LIB:-$HOME/.local/share/addendum/lib.sh}"
+
+FILE="${XDG_STATE_HOME:-$HOME/.local/state}/addendum/demo.txt"
+
+case "${1:-}" in
+spec)
+    printf 'title\tDemo (every field type)\n'
+    printf 'button\tWrite it\n'
+    printf 'field\tnote\ttext\tNote\trequired\thint=Anything at all\n'
+    printf 'field\tamount\tnumber\tAmount\tdecimals=2\n'
+    printf 'field\tday\tdate\tDay\tdefault=today\tkeep\n'
+    printf 'field\tat\ttime\tTime\n'
+    printf 'field\tcolour\tradio\tColour\trequired\tremember\n'
+    printf 'choice\tcolour\tred\tRed\n'
+    printf 'choice\tcolour\tgreen\tGreen\n'
+    printf 'choice\tcolour\tblue\tBlue\n'
+    printf 'field\tsize\tdropdown\tSize\n'
+    for s in small medium large; do printf 'choice\tsize\t%s\n' "$s"; done
+    printf 'field\tplanet\tdropdown\tPlanet (searchable)\n'
+    for p in Mercury Venus Earth Mars Jupiter Saturn Uranus Neptune Pluto Moon Cygnus; do
+        printf 'choice\tplanet\t%s\n' "$p"
+    done
+    printf 'field\turgent\tcheckbox\tUrgent\n'
+    printf 'status\n'
+    ;;
+status)
+    if [[ -s "$FILE" ]]; then tail -n 5 "$FILE"; else echo "(nothing written yet)"; fi
+    ;;
+add)
+    read_values
+    need note colour
+    check_date day
+    check_time at
+    [[ "${V[note]}" != *fail* ]] || die "note: you asked me to fail"
+    line=""
+    for k in note amount day at colour size planet urgent; do line+="$k=${V[$k]:-} "; done
+    mkdir -p "${FILE%/*}"
+    printf '%s\n' "$line" >> "$FILE"
+    printf '%s\n' "$line"
+    ;;
+*)
+    die "usage: $0 spec|status|add"
+    ;;
+esac

@@ -1,0 +1,43 @@
+#!/bin/bash
+# appointment: Addendum form that adds an entry to the BSD calendar(1)
+# appointments file, e.g.  "Nov 24<TAB>Auto Haus @ 08:00".
+# New entries are appended to the end; old ones are pruned by hand.
+
+set -euo pipefail
+source "${ADDENDUM_LIB:-$HOME/.local/share/addendum/lib.sh}"
+
+login_env CALENDAR_DIR
+FILE="$CALENDAR_DIR/calendar.appointments"
+DAYS_AHEAD=14            # what the status panel shows, like "twoweeks"
+
+case "${1:-}" in
+spec)
+    printf 'title\tAppointment\n'
+    printf 'button\tAdd appointment\n'
+    printf 'field\twhen\tdate\tDate\trequired\tdefault=today\n'
+    printf 'field\ttime\ttime\tTime\n'
+    printf 'field\twhat\ttext\tWhat\trequired\thint=Dentist, Auto Haus…\n'
+    printf 'status\n'
+    ;;
+status)
+    out=$(calendar -w -A "$DAYS_AHEAD" 2>&1) || fail "calendar failed: $out"
+    printf '%s\n' "${out:-(nothing in the next $DAYS_AHEAD days)}"
+    ;;
+add)
+    read_values
+    need when what
+    check_date when
+    check_time time
+    check_length what 200
+    what=$(printf '%s' "${V[what]}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [[ -n "$what" ]] || die "what: required"
+
+    line="$(date -d "${V[when]}" '+%b %d')"$'\t'"$what"
+    [[ -n "${V[time]:-}" ]] && line+=" @ ${V[time]}"
+    append_line "$FILE" "$line"
+    printf '%s\n' "$line"
+    ;;
+*)
+    die "usage: $0 spec|status|add"
+    ;;
+esac

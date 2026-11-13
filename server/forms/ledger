@@ -1,0 +1,154 @@
+#!/bin/bash
+# ledger: Addendum form that records one expense in a ledger-cli journal.
+#
+# The categories and "paid from" accounts are the accounts posted to in the
+# journal's "Opening Balances" transaction: Expenses:* for categories,
+# Assets:* and Liabilities:* for sources. The entry is appended to the end of
+# $LEDGER_FILE, uncleared, e.g.
+#
+#   2026-11-03 Gas at Petro-Canada
+#           Expenses:Car:Fuel                   $52.30
+#           Liabilities:Mastercard
+#
+# If ledger is installed, the journal is checked after appending and the
+# entry is rolled back if ledger can't parse it. The status panel shows the
+# Assets and Liabilities balances.
+
+set -euo pipefail
+source "${ADDENDUM_LIB:-$HOME/.local/share/addendum/lib.sh}"
+
+# ---- configuration -------------------------------------------------------
+# Posting layout: 8-space indent, account padded to 36.
+INDENT='        '
+ACCT_WIDTH=36
+# Accounts from the Opening Balances entry offered as expense categories.
+EXPENSE_RE='^(Expenses)(:|$)'
+# Accounts from the Opening Balances entry offered as "Paid from" sources.
+SOURCE_RE='^(Assets|Liabilities)(:|$)'
+# Arguments to ledger for the status panel.
+BALANCE_ARGS=(--depth=2 balance '^Assets' '^Liabilities' --no-total)
+# Ledger right-aligns amounts in a 20-column field, too wide for a phone.
+# Remove up to this many leading spaces from each line (never digits).
+BALANCE_TRIM=9
+DATE_FMT='%Y-%m-%d'
+COMMODITY='$'
+# --------------------------------------------------------------------------
+
+login_env LEDGER_FILE
+[[ "$LEDGER_FILE" = /* ]] || LEDGER_FILE="$HOME/$LEDGER_FILE"
+LEDGER_FILE="${LEDGER_FILE/#\~/$HOME}"
+[[ -f "$LEDGER_FILE" ]] || fail "ledger file not found: $LEDGER_FILE"
+
+# Print each account posted to in the "Opening Balances" transaction.
+opening_accounts() {
+    awk '
+        /^[0-9]/                { inob = ($0 ~ /Opening Balances/); next }
+        /^[^ \t]/ || /^[ \t]*$/ { inob = 0; next }
+        inob && /^[ \t]+[^ \t;]/ {
+            line = $0
+            sub(/^[ \t]+/, "", line)
+            # The account name ends at two spaces, a tab, or end of line.
+            split(line, parts, /  |\t/)
+            acct = parts[1]
+            sub(/[ \t]+$/, "", acct)
+            gsub(/^[\[(]|[\])]$/, "", acct)   # (virtual) / [balanced virtual]
+            if (acct != "") print acct
+        }
+    ' "$LEDGER_FILE"
+}
+
+expenses() { opening_accounts | grep -E "$EXPENSE_RE" | sort -u || true; }
+sources()  { opening_accounts | grep -E "$SOURCE_RE" | sort -u || true; }
+
+is_one_of() {
+    local needle=$1 x
+    shift
+    for x in "$@"; do [[ "$x" == "$needle" ]] && return 0; done
+    return 1
+}
+
+cmd_spec() {
+    local a
+    printf 'title\tLedger\n'
+    printf 'button\tRecord\n'
+    printf 'field\tpayee\ttext\tWhat was it for?\trequired\n'
+    printf 'field\tamount\tnumber\tAmount\trequired\tdecimals=2\thint=0.00\n'
+    printf 'field\tcategory\tdropdown\tCategory\trequired\n'
+    while IFS= read -r a; do printf 'choice\tcategory\t%s\n' "$a"; done < <(expenses)
+    printf 'field\tsource\tradio\tPaid from\trequired\tremember\n'
+    while IFS= read -r a; do printf 'choice\tsource\t%s\n' "$a"; done < <(sources)
+    printf 'field\tdate\tdate\tDate\trequired\tdefault=today\n'
+    command -v ledger >/dev/null 2>&1 && printf 'status\n'
+    return 0
+}
+
+cmd_status() {
+    command -v ledger >/dev/null 2>&1 || fail "ledger is not installed on the server"
+    local out
+    out=$(ledger -f "$LEDGER_FILE" "${BALANCE_ARGS[@]}" 2>&1) || fail "ledger failed: $out"
+    printf '%s\n' "$out" | sed "s/^ \{0,$BALANCE_TRIM\}//"
+}
+
+cmd_add() {
+    read_values
+    need payee amount category source date
+    check_date date
+    check_length payee 200
+
+    local payee=${V[payee]} amount=${V[amount]} category=${V[category]} source=${V[source]}
+    payee=$(printf '%s' "$payee" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [[ -n "$payee" ]] || die "payee: required"
+
+    local cats srcs
+    mapfile -t cats < <(expenses)
+    mapfile -t srcs < <(sources)
+    is_one_of "$category" "${cats[@]}" || die "category: unknown category: $category"
+    is_one_of "$source" "${srcs[@]}" || die "source: unknown account: $source"
+
+    [[ "$amount" =~ ^[0-9]{1,9}(\.[0-9]{1,2})?$ ]] || die "amount: not a valid amount: $amount"
+    amount=$(printf '%.2f' "$amount")
+    [[ "$amount" != "0.00" ]] || die "amount: must be more than zero"
+
+    local ldate
+    ldate=$(date -d "${V[date]}" +"$DATE_FMT")
+
+    # Ledger needs at least two spaces between account and amount.
+    # Entries are written uncleared (no '*'); mark them when reconciling.
+    local width=$(( ${#category} + 2 > ACCT_WIDTH ? ${#category} + 2 : ACCT_WIDTH ))
+    local txn
+    txn=$(printf '%s %s\n%s%-*s%s%s\n%s%s' \
+        "$ldate" "$payee" "$INDENT" "$width" "$category" "$COMMODITY" "$amount" "$INDENT" "$source")
+
+    # Lock the journal itself (fd 8; the dispatcher's own lock uses fd 9), so
+    # nothing else writing to it with flock can interleave.
+    exec 8>>"$LEDGER_FILE"
+    flock -w 10 8 || fail "the ledger file is busy, try again"
+
+    local size tail2 sep
+    size=$(stat -c %s "$LEDGER_FILE")
+    # Exactly one blank line between the previous content and the new entry.
+    tail2=$(tail -c 2 "$LEDGER_FILE" | od -An -c | tr -d ' ')
+    if (( size == 0 )); then sep=''
+    elif [[ "$tail2" == '\n\n' ]]; then sep=''
+    elif [[ "$tail2" == *'\n' ]]; then sep=$'\n'
+    else sep=$'\n\n'
+    fi
+    printf '%s%s\n' "$sep" "$txn" >&8 || fail "can't write to $LEDGER_FILE"
+
+    if command -v ledger >/dev/null 2>&1; then
+        local err
+        if ! err=$(ledger -f "$LEDGER_FILE" bal 2>&1 >/dev/null); then
+            truncate -s "$size" "$LEDGER_FILE"
+            fail "ledger rejected the file after adding the entry, so it was rolled back: $err"
+        fi
+    fi
+    exec 8>&-
+    printf '%s\n' "$txn"
+}
+
+case "${1:-}" in
+    spec)   cmd_spec ;;
+    status) cmd_status ;;
+    add)    cmd_add ;;
+    *)      die "usage: $0 spec|status|add" ;;
+esac

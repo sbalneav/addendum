@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- page -->
+    <path
+        android:fillColor="#F4F1E8"
+        android:pathData="M36,30h36a3,3 0,0 1,3 3v42a3,3 0,0 1,-3 3h-36a3,3 0,0 1,-3 -3v-42a3,3 0,0 1,3 -3z" />
+    <!-- lines already in the file -->
+    <path
+        android:strokeColor="#34507A"
+        android:strokeWidth="2"
+        android:pathData="M40,40h28M40,47h28M40,54h20" />
+    <!-- the line being added -->
+    <path
+        android:strokeColor="#C77B2A"
+        android:strokeWidth="3"
+        android:pathData="M54,67h14M61,60v14" />
+</vector>

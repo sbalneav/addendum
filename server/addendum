@@ -1,0 +1,129 @@
+#!/bin/bash
+# addendum: server side of the Addendum Android app (the dispatcher).
+#
+# Install as the SSH *forced command* for the phone's key (see server/README.md),
+# so that key can only run form scripts. The request arrives in
+# $SSH_ORIGINAL_COMMAND (or as arguments, when testing by hand):
+#
+#   list            -> prints the name of each available form, one per line
+#   <form> spec     -> runs "<form> spec": the form description
+#   <form> status   -> runs "<form> status": text for the panel under the form
+#   <form> add      -> reads "name<TAB>value" lines on stdin, including
+#                      "_id<TAB><uuid>". If that id was already recorded for this
+#                      form (a resend), prints "OK" and does nothing. Otherwise
+#                      runs "<form> add" with the other lines on stdin, under a
+#                      per-form lock. On success prints "OK" and the script's output.
+#
+# Forms are executables in $ADDENDUM_FORMS (default ~/.config/addendum/forms).
+# Exit status: 0 ok; 1 the request is invalid (don't retry);
+#              2 temporary server-side problem (retry later).
+# Messages go to stderr. See ARCHITECTURE.md for the full protocol.
+#
+# Test by hand:  addendum list
+#                printf 'when\t2026-12-01\nwhat\tTest\n' | addendum appointment add
+
+set -euo pipefail
+export LC_ALL=C.UTF-8
+
+FORMS_DIR="${ADDENDUM_FORMS:-${XDG_CONFIG_HOME:-$HOME/.config}/addendum/forms}"
+STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/addendum"
+export ADDENDUM_LIB="${ADDENDUM_LIB:-$HOME/.local/share/addendum/lib.sh}"
+SENT_IDS_KEEP=1000
+MAX_INPUT=65536
+NAME_RE='^[a-z0-9][a-z0-9_-]*$'
+
+die()  { echo "addendum: $*" >&2; exit 1; }   # bad request
+fail() { echo "addendum: $*" >&2; exit 2; }   # temporary problem
+
+# Split the request into words. "read -a" doesn't expand globs or variables.
+if [[ -n "${SSH_ORIGINAL_COMMAND+set}" ]]; then
+    read -r -a args <<< "$SSH_ORIGINAL_COMMAND" || true
+    # Form scripts get the command as "$1"; don't let them see it twice.
+    unset SSH_ORIGINAL_COMMAND
+else
+    args=("$@")
+fi
+
+valid_form() {
+    [[ "$1" =~ $NAME_RE && -f "$FORMS_DIR/$1" && -x "$FORMS_DIR/$1" ]]
+}
+
+cmd_list() {
+    local f name
+    [[ -d "$FORMS_DIR" ]] || return 0
+    for f in "$FORMS_DIR"/*; do
+        name=${f##*/}
+        valid_form "$name" && printf '%s\n' "$name"
+    done
+    return 0
+}
+
+# Run a form script and turn unexpected exit codes into 1, so that a broken
+# script shows its error on the phone rather than being retried forever.
+run_form() {
+    local rc=0
+    "$@" || rc=$?
+    (( rc <= 2 )) || { echo "addendum: form script failed (exit $rc)" >&2; rc=1; }
+    return "$rc"
+}
+
+cmd_add() {
+    local form=$1 script="$FORMS_DIR/$1"
+    local input line key val id="" values=""
+
+    input=$(head -c "$MAX_INPUT")
+    (( ${#input} < MAX_INPUT )) || die "request too large"
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        line=${line%$'\r'}
+        [[ -z "$line" ]] && continue
+        [[ "$line" == *$'\t'* ]] || die "bad input line: $line"
+        key=${line%%$'\t'*}
+        val=${line#*$'\t'}
+        [[ "$key" =~ ^[a-z0-9_]+$ ]] || die "bad field name: $key"
+        [[ "$val" != *[[:cntrl:]]* ]] || die "$key: control characters aren't allowed"
+        if [[ "$key" == _id ]]; then
+            [[ "$val" =~ ^[A-Za-z0-9-]{8,64}$ ]] || die "bad id: $val"
+            id=$val
+        else
+            values+="$key"$'\t'"$val"$'\n'
+        fi
+    done <<< "$input"
+
+    local state="$STATE_ROOT/$form"
+    mkdir -p "$state" || fail "can't create $state"
+    exec 9>>"$state/lock"
+    flock -w 10 9 || fail "$form is busy, try again"
+
+    if [[ -n "$id" && -f "$state/sent-ids" ]] && grep -qxF "$id" "$state/sent-ids"; then
+        printf 'OK\n(already recorded)\n'
+        return 0
+    fi
+
+    local out rc=0
+    out=$(run_form "$script" add <<< "$values") || rc=$?
+    (( rc == 0 )) || exit "$rc"
+
+    if [[ -n "$id" ]]; then
+        printf '%s\n' "$id" >> "$state/sent-ids"
+        if (( $(wc -l < "$state/sent-ids") > SENT_IDS_KEEP * 2 )); then
+            tail -n "$SENT_IDS_KEEP" "$state/sent-ids" > "$state/sent-ids.tmp" &&
+                mv "$state/sent-ids.tmp" "$state/sent-ids"
+        fi
+    fi
+    exec 9>&-
+    printf 'OK\n%s\n' "$out"
+}
+
+case "${#args[@]}:${args[0]:-}" in
+    1:list) cmd_list ;;
+    2:*)
+        form=${args[0]}
+        valid_form "$form" || die "no such form: $form"
+        case "${args[1]}" in
+            spec|status) run_form "$FORMS_DIR/$form" "${args[1]}" </dev/null ;;
+            add)         cmd_add "$form" ;;
+            *)           die "command not allowed: ${args[1]}" ;;
+        esac
+        ;;
+    *) die "command not allowed: ${args[*]:-}" ;;
+esac
